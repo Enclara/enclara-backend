@@ -104,16 +104,24 @@ def build_datasets(data_dir):
     print(f"Loaded {len(val_df)} validation samples")
 
     # Map dx labels to indices
-    train_df["label"] = train_df["dx"].map(DX_TO_IDX)
-    val_df["label"] = val_df["dx"].map(DX_TO_IDX)
+    # HuggingFace parquet may store dx as integers (ClassLabel) or strings
+    if train_df["dx"].dtype in ("int64", "int32", "int8"):
+        print(f"dx column is integer-encoded (values: {sorted(train_df['dx'].unique())})")
+        train_df["label"] = train_df["dx"]
+        val_df["label"] = val_df["dx"]
+    else:
+        print(f"dx column is string-encoded (values: {sorted(train_df['dx'].unique())})")
+        train_df["label"] = train_df["dx"].map(DX_TO_IDX)
+        val_df["label"] = val_df["dx"].map(DX_TO_IDX)
 
-    # Drop rows with unmapped labels
-    train_nan = train_df["label"].isna().sum()
-    val_nan = val_df["label"].isna().sum()
-    if train_nan > 0 or val_nan > 0:
-        print(f"WARNING: dropping {train_nan} train / {val_nan} val rows with unknown dx labels")
-        train_df = train_df.dropna(subset=["label"]).reset_index(drop=True)
-        val_df = val_df.dropna(subset=["label"]).reset_index(drop=True)
+        # Drop rows with unmapped labels
+        train_nan = train_df["label"].isna().sum()
+        val_nan = val_df["label"].isna().sum()
+        if train_nan > 0 or val_nan > 0:
+            print(f"WARNING: dropping {train_nan} train / {val_nan} val rows with unknown dx labels")
+            train_df = train_df.dropna(subset=["label"]).reset_index(drop=True)
+            val_df = val_df.dropna(subset=["label"]).reset_index(drop=True)
+
     train_df["label"] = train_df["label"].astype(int)
     val_df["label"] = val_df["label"].astype(int)
 
