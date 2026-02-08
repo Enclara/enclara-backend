@@ -44,41 +44,49 @@ class QuantVGG11Patch(nn.Module):
         self.quant_inp = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
         # --- features (mirrors VGG11 layout) ---
-        # block 1: conv 3->64, relu, avgpool
+        # block 1: conv 3->64, relu, avgpool, re-quantize
         self.conv1 = qnn.QuantConv2d(3, 64, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu1 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.quant_pool1 = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
-        # block 2: conv 64->128, relu, avgpool
+        # block 2: conv 64->128, relu, avgpool, re-quantize
         self.conv2 = qnn.QuantConv2d(64, 128, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu2 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.quant_pool2 = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
-        # block 3: conv 128->256, relu, conv 256->256, relu, avgpool
+        # block 3: conv 128->256, relu, conv 256->256, relu, avgpool, re-quantize
         self.conv3 = qnn.QuantConv2d(128, 256, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu3 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.conv4 = qnn.QuantConv2d(256, 256, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu4 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool3 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.quant_pool3 = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
-        # block 4: conv 256->512, relu, conv 512->512, relu, avgpool
+        # block 4: conv 256->512, relu, conv 512->512, relu, avgpool, re-quantize
         self.conv5 = qnn.QuantConv2d(256, 512, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu5 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.conv6 = qnn.QuantConv2d(512, 512, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu6 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool4 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.quant_pool4 = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
-        # block 5: conv 512->512, relu, conv 512->512, relu, avgpool
+        # block 5: conv 512->512, relu, conv 512->512, relu, avgpool, re-quantize
         self.conv7 = qnn.QuantConv2d(512, 512, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu7 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.conv8 = qnn.QuantConv2d(512, 512, kernel_size=3, padding=1, weight_bit_width=BIT_WIDTH, bias_quant=None)
         self.relu8 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool5 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.quant_pool5 = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
         # fixed-size pool: input is already 1x1 after pool5 with 32x32 input,
         # use AvgPool2d instead of AdaptiveAvgPool2d to avoid unsupported
         # GlobalAveragePool ONNX op in Concrete-ML
         self.avgpool = nn.AvgPool2d(kernel_size=1, stride=1)
+
+        # re-quantize before classifier
+        self.quant_pre_classifier = qnn.QuantIdentity(bit_width=BIT_WIDTH, return_quant_tensor=True)
 
         # classifier: single linear layer (replaced VGG's 3-layer MLP)
         self.classifier = qnn.QuantLinear(512, NUM_CLASSES, weight_bit_width=BIT_WIDTH, bias_quant=None)
@@ -87,20 +95,21 @@ class QuantVGG11Patch(nn.Module):
         # pure sequential -- no control flow, safe for ONNX export / FHE compilation
         x = self.quant_inp(x)
 
-        x = self.pool1(self.relu1(self.conv1(x)))
-        x = self.pool2(self.relu2(self.conv2(x)))
+        x = self.quant_pool1(self.pool1(self.relu1(self.conv1(x))))
+        x = self.quant_pool2(self.pool2(self.relu2(self.conv2(x))))
 
         x = self.relu3(self.conv3(x))
-        x = self.pool3(self.relu4(self.conv4(x)))
+        x = self.quant_pool3(self.pool3(self.relu4(self.conv4(x))))
 
         x = self.relu5(self.conv5(x))
-        x = self.pool4(self.relu6(self.conv6(x)))
+        x = self.quant_pool4(self.pool4(self.relu6(self.conv6(x))))
 
         x = self.relu7(self.conv7(x))
-        x = self.pool5(self.relu8(self.conv8(x)))
+        x = self.quant_pool5(self.pool5(self.relu8(self.conv8(x))))
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+        x = self.quant_pre_classifier(x)
         x = self.classifier(x)
         return x
 

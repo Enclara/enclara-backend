@@ -290,6 +290,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0, help="dataloader workers (default: 0, images already in memory)")
     parser.add_argument("--save-path", type=str, default="quant_vgg11_patch.pth")
     parser.add_argument("--no-amp", action="store_true", help="disable automatic mixed precision")
+    parser.add_argument("--resume", type=str, default=None, help="path to checkpoint to resume from (loads with strict=False for architecture changes)")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -330,9 +331,18 @@ def main():
         persistent_workers=args.num_workers > 0
     )
 
-    # build model with pretrained conv weights
+    # build model
     model = QuantVGG11Patch()
-    model = load_pretrained_weights(model)
+    if args.resume:
+        print(f"\nResuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location="cpu")
+        missing, unexpected = model.load_state_dict(checkpoint, strict=False)
+        if missing:
+            print(f"  New layers (randomly initialized): {missing}")
+        if unexpected:
+            print(f"  Ignored keys from checkpoint: {unexpected}")
+    else:
+        model = load_pretrained_weights(model)
     model = model.to(device)
 
     # aggregator is a plain python wrapper, not an nn.Module
