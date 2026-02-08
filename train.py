@@ -29,8 +29,16 @@ import io
 from model import QuantVGG11Patch, PatchAggregator, load_pretrained_weights, NUM_CLASSES
 
 
-# --- label mapping (alphabetical) ---
-DX_TO_IDX = {"akiec": 0, "bcc": 1, "bkl": 2, "df": 3, "mel": 4, "nv": 5, "vasc": 6}
+# --- label mapping ---
+DX_TO_IDX = {
+    "actinic_keratoses": 0,
+    "basal_cell_carcinoma": 1,
+    "benign_keratosis-like_lesions": 2,
+    "dermatofibroma": 3,
+    "melanoma": 4,
+    "melanocytic_Nevi": 5,
+    "vascular_lesions": 6,
+}
 IDX_TO_DX = {v: k for k, v in DX_TO_IDX.items()}
 
 
