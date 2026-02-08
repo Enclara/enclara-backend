@@ -107,7 +107,7 @@ class QuantVGG11Patch(nn.Module):
         x = self.relu7(self.conv7(x))
         x = self.quant_pool5(self.pool5(self.relu8(self.conv8(x))))
 
-        x = self.avgpool(x)
+        # avgpool removed: spatial size is already 1x1 after pool5 with 32x32 input
         x = torch.flatten(x, 1)
         x = self.quant_pre_classifier(x)
         x = self.classifier(x)
