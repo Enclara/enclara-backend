@@ -2,5 +2,6 @@ concrete-ml==1.9.0
 torch==2.3.1
 torchvision==0.18.1
 pandas
+pyarrow
 scikit-learn
 Pillow
