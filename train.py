@@ -11,11 +11,10 @@ Expects data downloaded from HuggingFace (marmal88/skin_cancer) in parquet forma
     test-00000-of-00001-*.parquet
 
 Usage:
-  python train.py --data-dir ./data --epochs 20 --batch-size 4 --lr 1e-4
+  python train.py --data-dir ./data --epochs 20 --batch-size 16 --lr 1e-4
 """
 
 import argparse
-import os
 from pathlib import Path
 import glob
 
@@ -85,6 +84,11 @@ def build_datasets(data_dir):
     train_files = sorted(glob.glob(str(data_dir / "train-*.parquet")))
     val_files = sorted(glob.glob(str(data_dir / "validation-*.parquet")))
 
+    if not train_files:
+        raise FileNotFoundError(f"No training parquet files found in {data_dir} (expected train-*.parquet)")
+    if not val_files:
+        raise FileNotFoundError(f"No validation parquet files found in {data_dir} (expected validation-*.parquet)")
+
     print(f"Found {len(train_files)} training parquet files")
     print(f"Found {len(val_files)} validation parquet files")
 
@@ -102,6 +106,16 @@ def build_datasets(data_dir):
     # Map dx labels to indices
     train_df["label"] = train_df["dx"].map(DX_TO_IDX)
     val_df["label"] = val_df["dx"].map(DX_TO_IDX)
+
+    # Drop rows with unmapped labels
+    train_nan = train_df["label"].isna().sum()
+    val_nan = val_df["label"].isna().sum()
+    if train_nan > 0 or val_nan > 0:
+        print(f"WARNING: dropping {train_nan} train / {val_nan} val rows with unknown dx labels")
+        train_df = train_df.dropna(subset=["label"]).reset_index(drop=True)
+        val_df = val_df.dropna(subset=["label"]).reset_index(drop=True)
+    train_df["label"] = train_df["label"].astype(int)
+    val_df["label"] = val_df["label"].astype(int)
 
     print(f"Training class distribution:\n{train_df['dx'].value_counts().to_string()}")
 
@@ -136,32 +150,41 @@ def build_datasets(data_dir):
 
 # --- training ---
 def pick_device():
-    """apple metal if available, else cpu"""
-    if torch.backends.mps.is_available():
-        print("using Apple Metal (MPS)")
-        return torch.device("mps")
-    print("MPS not available, using CPU")
+    """CUDA if available (for AWS GPU instances), else CPU"""
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"Using CUDA GPU: {gpu_name}")
+        return torch.device("cuda")
+    print("CUDA not available, using CPU")
     return torch.device("cpu")
 
 
-def train_one_epoch(model, aggregator, loader, criterion, optimizer, device):
+def train_one_epoch(model, aggregator, loader, criterion, optimizer, device, scaler=None):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
 
     for batch_idx, (images, labels) in enumerate(loader):
-        images = images.to(device)  # [B, 3, 224, 224]
-        labels = labels.to(device)  # [B]
+        images = images.to(device, non_blocking=True)  # [B, 3, 224, 224]
+        labels = labels.to(device, non_blocking=True)  # [B]
 
         optimizer.zero_grad()
 
-        # aggregator splits into patches, runs model, takes max per class
-        logits = aggregator(images)  # [B, 7]
+        # Use automatic mixed precision if scaler is provided
+        if scaler is not None:
+            with torch.amp.autocast("cuda"):
+                logits = aggregator(images)  # [B, 7]
+                loss = criterion(logits, labels)
 
-        loss = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits = aggregator(images)  # [B, 7]
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=1)
@@ -186,11 +209,16 @@ def evaluate(model, aggregator, loader, criterion, device):
     per_class_total = [0] * NUM_CLASSES
 
     for images, labels in loader:
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
-        logits = aggregator(images)
-        loss = criterion(logits, labels)
+        if torch.cuda.is_available():
+            with torch.amp.autocast("cuda"):
+                logits = aggregator(images)
+                loss = criterion(logits, labels)
+        else:
+            logits = aggregator(images)
+            loss = criterion(logits, labels)
 
         total_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=1)
@@ -219,17 +247,35 @@ def main():
     parser = argparse.ArgumentParser(description="fine-tune QuantVGG11Patch on HAM10000")
     parser.add_argument("--data-dir", type=str, default="./data", help="path to HAM10000 data")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=16, help="batch size (default: 16 for g4dn.xlarge)")
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--num-workers", type=int, default=3, help="dataloader workers (default: 3 for g4dn.xlarge)")
     parser.add_argument("--save-path", type=str, default="quant_vgg11_patch.pth")
+    parser.add_argument("--no-amp", action="store_true", help="disable automatic mixed precision")
     args = parser.parse_args()
 
     device = pick_device()
 
     # build datasets
     train_ds, val_ds, class_weights = build_datasets(args.data_dir)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+
+    # Optimize DataLoader for GPU training
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),  # faster CPU-to-GPU transfer
+        persistent_workers=args.num_workers > 0  # keep workers alive between epochs
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=args.num_workers > 0
+    )
 
     # build model with pretrained conv weights
     model = QuantVGG11Patch()
@@ -243,11 +289,17 @@ def main():
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    # Initialize GradScaler for automatic mixed precision (AMP)
+    scaler = None
+    if torch.cuda.is_available() and not args.no_amp:
+        scaler = torch.amp.GradScaler("cuda")
+        print("Using automatic mixed precision (AMP) for faster training")
+
     best_val_acc = 0.0
     for epoch in range(args.epochs):
         print(f"\n--- epoch {epoch + 1}/{args.epochs} ---")
 
-        train_loss, train_acc = train_one_epoch(model, aggregator, train_loader, criterion, optimizer, device)
+        train_loss, train_acc = train_one_epoch(model, aggregator, train_loader, criterion, optimizer, device, scaler)
         print(f"  train loss: {train_loss:.4f}, train acc: {train_acc:.4f}")
 
         val_loss, val_acc = evaluate(model, aggregator, val_loader, criterion, device)
