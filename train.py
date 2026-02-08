@@ -287,7 +287,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16, help="batch size (default: 16 for g4dn.xlarge)")
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num-workers", type=int, default=3, help="dataloader workers (default: 3 for g4dn.xlarge)")
+    parser.add_argument("--num-workers", type=int, default=0, help="dataloader workers (default: 0, images already in memory)")
     parser.add_argument("--save-path", type=str, default="quant_vgg11_patch.pth")
     parser.add_argument("--no-amp", action="store_true", help="disable automatic mixed precision")
     args = parser.parse_args()
