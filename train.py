@@ -17,6 +17,7 @@ Usage:
 import argparse
 from pathlib import Path
 import glob
+import time
 
 import pandas as pd
 import torch
@@ -180,6 +181,9 @@ def train_one_epoch(model, aggregator, loader, criterion, optimizer, device, sca
     total_loss = 0.0
     correct = 0
     total = 0
+    num_batches = len(loader)
+    log_interval = max(1, num_batches // 10)  # log ~10 times per epoch
+    epoch_start = time.time()
 
     for batch_idx, (images, labels) in enumerate(loader):
         images = images.to(device, non_blocking=True)  # [B, 3, 224, 224]
@@ -207,11 +211,20 @@ def train_one_epoch(model, aggregator, loader, criterion, optimizer, device, sca
         correct += (preds == labels).sum().item()
         total += labels.size(0)
 
-        if (batch_idx + 1) % 50 == 0:
-            print(f"  batch {batch_idx + 1}/{len(loader)}, loss: {loss.item():.4f}")
+        if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
+            running_loss = total_loss / total
+            running_acc = correct / total
+            elapsed = time.time() - epoch_start
+            samples_per_sec = total / elapsed
+            print(f"  [{batch_idx + 1:>4d}/{num_batches}] "
+                  f"loss: {loss.item():.4f} (avg: {running_loss:.4f}) | "
+                  f"acc: {running_acc:.4f} | "
+                  f"{samples_per_sec:.1f} samples/sec")
 
     avg_loss = total_loss / total
     accuracy = correct / total
+    epoch_time = time.time() - epoch_start
+    print(f"  TRAIN complete: {epoch_time:.1f}s | loss: {avg_loss:.4f} | acc: {accuracy:.4f}")
     return avg_loss, accuracy
 
 
@@ -223,8 +236,10 @@ def evaluate(model, aggregator, loader, criterion, device):
     total = 0
     per_class_correct = [0] * NUM_CLASSES
     per_class_total = [0] * NUM_CLASSES
+    eval_start = time.time()
+    num_batches = len(loader)
 
-    for images, labels in loader:
+    for batch_idx, (images, labels) in enumerate(loader):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
@@ -247,14 +262,21 @@ def evaluate(model, aggregator, loader, criterion, device):
             if preds[i].item() == c:
                 per_class_correct[c] += 1
 
+        if (batch_idx + 1) == num_batches:
+            elapsed = time.time() - eval_start
+            print(f"  VAL complete: {elapsed:.1f}s | evaluated {total} samples")
+
     avg_loss = total_loss / total
     accuracy = correct / total
 
-    print(f"  per-class recall:")
+    print(f"  VAL loss: {avg_loss:.4f} | acc: {accuracy:.4f} ({correct}/{total})")
+    print(f"  Per-class breakdown:")
+    print(f"    {'Class':<35s} {'Recall':>8s}  {'Correct':>8s}  {'Total':>8s}")
+    print(f"    {'-'*35} {'-'*8}  {'-'*8}  {'-'*8}")
     for i in range(NUM_CLASSES):
         if per_class_total[i] > 0:
             recall = per_class_correct[i] / per_class_total[i]
-            print(f"    {IDX_TO_DX[i]:>6s}: {recall:.3f} ({per_class_correct[i]}/{per_class_total[i]})")
+            print(f"    {IDX_TO_DX[i]:<35s} {recall:>8.3f}  {per_class_correct[i]:>8d}  {per_class_total[i]:>8d}")
 
     return avg_loss, accuracy
 
@@ -270,10 +292,25 @@ def main():
     parser.add_argument("--no-amp", action="store_true", help="disable automatic mixed precision")
     args = parser.parse_args()
 
+    print("=" * 70)
+    print("  QuantVGG11Patch Fine-Tuning on Skin Cancer Dataset")
+    print("=" * 70)
+    print(f"  Data dir:     {args.data_dir}")
+    print(f"  Epochs:       {args.epochs}")
+    print(f"  Batch size:   {args.batch_size}")
+    print(f"  Learning rate: {args.lr}")
+    print(f"  Num workers:  {args.num_workers}")
+    print(f"  Save path:    {args.save_path}")
+    print(f"  AMP:          {'disabled' if args.no_amp else 'enabled'}")
+    print("=" * 70)
+
     device = pick_device()
 
     # build datasets
+    print("\n--- Loading datasets ---")
+    load_start = time.time()
     train_ds, val_ds, class_weights = build_datasets(args.data_dir)
+    print(f"Datasets loaded in {time.time() - load_start:.1f}s")
 
     # Optimize DataLoader for GPU training
     train_loader = DataLoader(
@@ -311,23 +348,50 @@ def main():
         scaler = torch.amp.GradScaler("cuda")
         print("Using automatic mixed precision (AMP) for faster training")
 
+    print(f"\n{'=' * 70}")
+    print(f"  Starting training: {len(train_ds)} train / {len(val_ds)} val samples")
+    print(f"  {len(train_loader)} train batches / {len(val_loader)} val batches per epoch")
+    print(f"{'=' * 70}")
+
+    training_start = time.time()
     best_val_acc = 0.0
+    best_epoch = 0
     for epoch in range(args.epochs):
-        print(f"\n--- epoch {epoch + 1}/{args.epochs} ---")
+        epoch_start = time.time()
+        print(f"\n{'=' * 70}")
+        print(f"  EPOCH {epoch + 1}/{args.epochs}")
+        print(f"{'=' * 70}")
 
         train_loss, train_acc = train_one_epoch(model, aggregator, train_loader, criterion, optimizer, device, scaler)
-        print(f"  train loss: {train_loss:.4f}, train acc: {train_acc:.4f}")
-
         val_loss, val_acc = evaluate(model, aggregator, val_loader, criterion, device)
-        print(f"  val loss: {val_loss:.4f}, val acc: {val_acc:.4f}")
 
+        epoch_time = time.time() - epoch_start
+        total_elapsed = time.time() - training_start
+        epochs_left = args.epochs - (epoch + 1)
+        avg_epoch_time = total_elapsed / (epoch + 1)
+        eta = avg_epoch_time * epochs_left
+
+        improved = ""
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            best_epoch = epoch + 1
             torch.save(model.state_dict(), args.save_path)
-            print(f"  saved best model (val_acc={val_acc:.4f})")
+            improved = " ** NEW BEST **"
 
-    print(f"\nbest val accuracy: {best_val_acc:.4f}")
-    print(f"model saved to: {args.save_path}")
+        print(f"\n  Epoch {epoch + 1} summary:")
+        print(f"    Train loss: {train_loss:.4f} | Train acc: {train_acc:.4f}")
+        print(f"    Val loss:   {val_loss:.4f} | Val acc:   {val_acc:.4f}{improved}")
+        print(f"    Best so far: {best_val_acc:.4f} (epoch {best_epoch})")
+        print(f"    Epoch time: {epoch_time:.1f}s | Elapsed: {total_elapsed:.0f}s | ETA: {eta:.0f}s")
+
+    total_time = time.time() - training_start
+    print(f"\n{'=' * 70}")
+    print(f"  TRAINING COMPLETE")
+    print(f"{'=' * 70}")
+    print(f"  Total time:       {total_time:.0f}s ({total_time / 60:.1f} min)")
+    print(f"  Best val accuracy: {best_val_acc:.4f} (epoch {best_epoch})")
+    print(f"  Model saved to:   {args.save_path}")
+    print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":
