@@ -1,11 +1,14 @@
 """
 Fine-tune QuantVGG11Patch on HAM10000 skin cancer dataset.
 
-Expects data downloaded from Kaggle (kmader/skin-cancer-mnist-ham10000):
+Expects data downloaded from HuggingFace (marmal88/skin_cancer) in parquet format:
   data/
-    HAM10000_metadata.csv
-    HAM10000_images_part_1/
-    HAM10000_images_part_2/
+    train-00000-of-00005-*.parquet
+    train-00001-of-00005-*.parquet
+    ...
+    validation-00000-of-00002-*.parquet
+    validation-00001-of-00002-*.parquet
+    test-00000-of-00001-*.parquet
 
 Usage:
   python train.py --data-dir ./data --epochs 20 --batch-size 4 --lr 1e-4
@@ -14,6 +17,7 @@ Usage:
 import argparse
 import os
 from pathlib import Path
+import glob
 
 import pandas as pd
 import torch
@@ -21,7 +25,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
-from sklearn.model_selection import GroupShuffleSplit
+import io
 
 from model import QuantVGG11Patch, PatchAggregator, load_pretrained_weights, NUM_CLASSES
 
@@ -37,16 +41,33 @@ class HAM10000Dataset(Dataset):
     Loads HAM10000 images, center-crops to 224x224, returns 49 patches of 32x32.
     """
 
-    def __init__(self, image_paths, labels, transform=None):
-        self.image_paths = image_paths
+    def __init__(self, images, labels, transform=None):
+        """
+        Args:
+            images: list of PIL Images or image bytes
+            labels: list of integer labels
+            transform: torchvision transforms
+        """
+        self.images = images
         self.labels = labels
         self.transform = transform
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.images)
 
     def __getitem__(self, idx):
-        img = Image.open(self.image_paths[idx]).convert("RGB")
+        img = self.images[idx]
+        # Convert to PIL Image if needed
+        if not isinstance(img, Image.Image):
+            if isinstance(img, bytes):
+                img = Image.open(io.BytesIO(img)).convert("RGB")
+            elif isinstance(img, dict) and 'bytes' in img:
+                img = Image.open(io.BytesIO(img['bytes'])).convert("RGB")
+            else:
+                raise ValueError(f"Unsupported image format: {type(img)}")
+        else:
+            img = img.convert("RGB")
+
         if self.transform:
             img = self.transform(img)
         label = self.labels[idx]
@@ -55,44 +76,38 @@ class HAM10000Dataset(Dataset):
 
 def build_datasets(data_dir):
     """
-    Read metadata CSV, locate images, split by lesion_id to prevent leakage.
+    Read parquet files from HuggingFace dataset.
     Returns train_dataset, val_dataset, class_weights tensor.
     """
     data_dir = Path(data_dir)
-    meta = pd.read_csv(data_dir / "HAM10000_metadata.csv")
 
-    # find each image file -- could be in part_1 or part_2
-    image_dirs = [
-        data_dir / "HAM10000_images_part_1",
-        data_dir / "HAM10000_images_part_2",
-    ]
+    # Load all training parquet files
+    train_files = sorted(glob.glob(str(data_dir / "train-*.parquet")))
+    val_files = sorted(glob.glob(str(data_dir / "validation-*.parquet")))
 
-    def find_image(image_id):
-        for d in image_dirs:
-            p = d / f"{image_id}.jpg"
-            if p.exists():
-                return str(p)
-        return None
+    print(f"Found {len(train_files)} training parquet files")
+    print(f"Found {len(val_files)} validation parquet files")
 
-    meta["path"] = meta["image_id"].apply(find_image)
-    meta = meta.dropna(subset=["path"])  # drop if image not found
-    meta["label"] = meta["dx"].map(DX_TO_IDX)
+    # Read and concatenate all train parquet files
+    train_dfs = [pd.read_parquet(f) for f in train_files]
+    train_df = pd.concat(train_dfs, ignore_index=True)
 
-    print(f"found {len(meta)} images")
-    print(f"class distribution:\n{meta['dx'].value_counts().to_string()}")
+    # Read and concatenate all validation parquet files
+    val_dfs = [pd.read_parquet(f) for f in val_files]
+    val_df = pd.concat(val_dfs, ignore_index=True)
 
-    # split by lesion_id so same lesion stays in same split (prevents leakage)
-    splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_idx, val_idx = next(splitter.split(meta, meta["label"], groups=meta["lesion_id"]))
+    print(f"Loaded {len(train_df)} training samples")
+    print(f"Loaded {len(val_df)} validation samples")
 
-    train_meta = meta.iloc[train_idx].reset_index(drop=True)
-    val_meta = meta.iloc[val_idx].reset_index(drop=True)
+    # Map dx labels to indices
+    train_df["label"] = train_df["dx"].map(DX_TO_IDX)
+    val_df["label"] = val_df["dx"].map(DX_TO_IDX)
 
-    print(f"train: {len(train_meta)}, val: {len(val_meta)}")
+    print(f"Training class distribution:\n{train_df['dx'].value_counts().to_string()}")
 
-    # compute class weights from training set (inverse frequency)
-    class_counts = train_meta["label"].value_counts().sort_index()
-    total = len(train_meta)
+    # Compute class weights from training set (inverse frequency)
+    class_counts = train_df["label"].value_counts().sort_index()
+    total = len(train_df)
     weights = []
     for i in range(NUM_CLASSES):
         count = class_counts.get(i, 1)
@@ -100,15 +115,21 @@ def build_datasets(data_dir):
     class_weights = torch.tensor(weights, dtype=torch.float32)
     print(f"class weights: {class_weights.tolist()}")
 
-    # imagenet normalization
+    # ImageNet normalization
     transform = transforms.Compose([
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    train_ds = HAM10000Dataset(train_meta["path"].tolist(), train_meta["label"].tolist(), transform)
-    val_ds = HAM10000Dataset(val_meta["path"].tolist(), val_meta["label"].tolist(), transform)
+    # Extract images and labels
+    train_images = train_df["image"].tolist()
+    train_labels = train_df["label"].tolist()
+    val_images = val_df["image"].tolist()
+    val_labels = val_df["label"].tolist()
+
+    train_ds = HAM10000Dataset(train_images, train_labels, transform)
+    val_ds = HAM10000Dataset(val_images, val_labels, transform)
 
     return train_ds, val_ds, class_weights
 
