@@ -75,8 +75,10 @@ class QuantVGG11Patch(nn.Module):
         self.relu8 = qnn.QuantReLU(bit_width=BIT_WIDTH, return_quant_tensor=True)
         self.pool5 = nn.AvgPool2d(kernel_size=2, stride=2)
 
-        # adaptive pool: output_size=1 (changed from 7 in original VGG)
-        self.avgpool = nn.AdaptiveAvgPool2d(output_size=1)
+        # fixed-size pool: input is already 1x1 after pool5 with 32x32 input,
+        # use AvgPool2d instead of AdaptiveAvgPool2d to avoid unsupported
+        # GlobalAveragePool ONNX op in Concrete-ML
+        self.avgpool = nn.AvgPool2d(kernel_size=1, stride=1)
 
         # classifier: single linear layer (replaced VGG's 3-layer MLP)
         self.classifier = qnn.QuantLinear(512, NUM_CLASSES, weight_bit_width=BIT_WIDTH, bias_quant=None)
