@@ -1,0 +1,29 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/fhe/compilation/module_compiler.py", line 405, in compile
+    function.evaluate("Compiling", inputset, configuration, function_artifacts)
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/fhe/compilation/module_compiler.py", line 233, in evaluate
+    self.trace(first_sample, artifacts)
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/fhe/compilation/module_compiler.py", line 146, in trace
+    self.graph = Tracer.trace(self.function, parameters, location=self.location)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/fhe/tracing/tracer.py", line 82, in trace
+    output_tracers: Any = function(**arguments)
+                          ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/ml/common/utils.py", line 1, in _clear_forward_proxy
+    """Utils that can be re-used by other pieces of code in the module."""
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/ml/quantization/quantized_module.py", line 578, in _clear_forward
+    _raise_qat_import_error(bad_qat_ops)
+  File "/home/ubuntu/train/venv/lib/python3.12/site-packages/concrete/ml/quantization/quantized_module.py", line 49, in _raise_qat_import_error
+    raise ValueError(
+ValueError: Error occurred during quantization aware training (QAT) import: The following tensors were expected to be quantized, but the values found during calibration do not appear to be quantized. 
+
+* Tensor /pool1/AveragePool_output_0, input of a Conv operation
+* Tensor /pool2/AveragePool_output_0, input of a Conv operation
+* Tensor /pool3/AveragePool_output_0, input of a Conv operation
+* Tensor /pool4/AveragePool_output_0, input of a Conv operation
+* Tensor /pool5/AveragePool_output_0, input of a AveragePool operation
+* Tensor /avgpool/AveragePool_output_0, input of a Flatten operation
+* Tensor /Flatten_output_0, input of a Gemm operation
+
+Are you missing a QuantIdentity layer in your Brevitas model? Please check the ONNX graph of this model.
