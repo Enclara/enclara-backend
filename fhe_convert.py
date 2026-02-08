@@ -138,6 +138,7 @@ def main():
     parser.add_argument("--num-calibration", type=int, default=100, help="num patches for calibration")
     parser.add_argument("--max-eval-images", type=int, default=200, help="max val images for simulation eval (None=all)")
     parser.add_argument("--sweep-rounding", action="store_true", help="sweep rounding n_bits from 8 down to 4")
+    parser.add_argument("--save-circuit", type=str, default=None, help="directory to save the compiled FHE circuit for deployment")
     args = parser.parse_args()
 
     # load trained model (on CPU -- FHE compilation is CPU-only)
@@ -188,6 +189,25 @@ def main():
             max_eval_images=args.max_eval_images,
         )
         print(f"\nfinal FHE simulation accuracy: {acc:.4f}")
+
+        # save the compiled FHE circuit for deployment
+        if args.save_circuit:
+            save_dir = Path(args.save_circuit)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            # generate keys (needed before saving client/server)
+            print("\ngenerating FHE keys...")
+            quantized_module.fhe_circuit.keygen()
+
+            # save client (for encryption/decryption) and server (for FHE evaluation)
+            client_path = save_dir / "client.zip"
+            server_path = save_dir / "server.zip"
+            quantized_module.fhe_circuit.client.save(str(client_path))
+            quantized_module.fhe_circuit.server.save(str(server_path))
+
+            print(f"saved client specs to: {client_path}")
+            print(f"saved server specs to: {server_path}")
+            print(f"circuit saved to: {save_dir}")
 
 
 if __name__ == "__main__":
